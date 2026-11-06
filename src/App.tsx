@@ -54,16 +54,13 @@ export default function App() {
   useEffect(() => {
     loadState();
 
-    // Subscribe to realtime Server-Sent Events (SSE)
+    // Subscribe to realtime Firestore sync
     const unsubscribe = subscribeToRealtimeUpdates((event) => {
       setIsOnline(true);
       if (event.type === 'CONNECTED') {
-        // Connected to SSE
-      } else if (event.type === 'SUBMISSION_RECEIVED') {
-        if (event.data?.leaderboard) {
-          setLeaderboard(event.data.leaderboard);
-        }
+        // Connected to Cloud
       } else if (event.type === 'STAGE_ACTIVATED') {
+        // Realtime stage activation from Panitia laptop -> changes immediately on Student phones!
         if (event.data?.activeStageId) {
           setActiveStageId(event.data.activeStageId);
         }
@@ -73,24 +70,38 @@ export default function App() {
         if (event.data?.leaderboard) {
           setLeaderboard(event.data.leaderboard);
         }
-        loadState();
+      } else if (event.type === 'SUBMISSION_RECEIVED') {
+        // Realtime score & rank update from Student phones -> updates Panitia leaderboard immediately!
+        if (event.data?.leaderboard) {
+          setLeaderboard(event.data.leaderboard);
+        }
       } else if (event.type === 'STUDENTS_PROMOTED') {
         if (event.data?.students) {
           setStudents(event.data.students);
           // Update current student if their qualified stage changed
-          if (currentUser && userRole === 'student') {
-            const updatedMe = event.data.students.find((s: Student) => s.id === currentUser.id);
-            if (updatedMe && (updatedMe.qualifiedStage !== currentUser.qualifiedStage || updatedMe.status !== currentUser.status)) {
-              setCurrentUser(updatedMe);
-              localStorage.setItem('gelora26_user', JSON.stringify(updatedMe));
+          setCurrentUser((prevUser: any) => {
+            if (prevUser?.id) {
+              const updatedMe = event.data.students.find((s: Student) => s.id === prevUser.id);
+              if (updatedMe) {
+                try {
+                  localStorage.setItem('gelora26_user', JSON.stringify(updatedMe));
+                } catch {
+                  // ignore
+                }
+                return updatedMe;
+              }
             }
-          }
+            return prevUser;
+          });
         }
         if (event.data?.leaderboard) {
           setLeaderboard(event.data.leaderboard);
         }
-        loadState();
-      } else if (event.type === 'STATE_UPDATED' || event.type === 'STATE_RESET') {
+      } else if (event.type === 'STATE_UPDATED') {
+        if (event.data?.questions) {
+          setQuestions(event.data.questions);
+        }
+      } else if (event.type === 'STATE_RESET') {
         loadState();
       } else if (event.type === 'POLL_SYNC' && event.data) {
         if (event.data.activeStageId) setActiveStageId(event.data.activeStageId);
@@ -179,6 +190,7 @@ export default function App() {
       activeStageId={activeStageId}
       stages={stages}
       questions={questions}
+      leaderboard={leaderboard}
       onLogout={handleLogout}
       onRefreshState={loadState}
     />

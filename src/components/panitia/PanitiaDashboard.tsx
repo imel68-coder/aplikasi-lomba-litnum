@@ -12,7 +12,7 @@ import {
   adminDeleteStudent, adminBulkSeedStudents, adminResetProgress,
   adminSaveQuestion, adminSaveStudent,
   exportDatabaseBackup, importDatabaseBackup, getCustomServerUrl,
-  setCustomServerUrl, getServerStatus
+  setCustomServerUrl, getServerStatus, sendRealtimePing
 } from '../../services/api';
 import { QuestionEditorModal } from './QuestionEditorModal';
 import { StudentEditorModal } from './StudentEditorModal';
@@ -50,6 +50,7 @@ export const PanitiaDashboard: React.FC<PanitiaDashboardProps> = ({
   const [successToast, setSuccessToast] = useState('');
   const [customServerUrlInput, setCustomServerUrlInput] = useState(getCustomServerUrl());
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [pingStatus, setPingStatus] = useState<string>('');
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
     title: string;
@@ -61,6 +62,19 @@ export const PanitiaDashboard: React.FC<PanitiaDashboardProps> = ({
   const showToast = (msg: string) => {
     setSuccessToast(msg);
     setTimeout(() => setSuccessToast(''), 3500);
+  };
+
+  const handleTestPing = async () => {
+    setPingStatus('Mengirim sinyal cloud...');
+    try {
+      const t0 = performance.now();
+      await sendRealtimePing();
+      const latency = Math.round(performance.now() - t0);
+      setPingStatus(`🟢 Cloud Terhubung! Latensi: ${latency}ms (Real-Time Aktif)`);
+      showToast(`Ping Real-Time Berhasil! Latensi: ${latency}ms`);
+    } catch (err: any) {
+      setPingStatus('🔴 Gagal menghubungi cloud: ' + err.message);
+    }
   };
 
   const copyToClipboard = (text: string, key: string) => {
@@ -1084,25 +1098,43 @@ export const PanitiaDashboard: React.FC<PanitiaDashboardProps> = ({
                 </div>
 
                 <div className="p-4 bg-sky-50 border border-sky-200 rounded-xl">
-                  <div className="text-xs font-bold text-sky-800 uppercase tracking-wider mb-1">Hosting Netlify</div>
+                  <div className="text-xs font-bold text-sky-800 uppercase tracking-wider mb-1">Hosting Netlify Siswa</div>
                   <div className="text-base font-black text-sky-950 flex items-center gap-1.5">
-                    <Globe className="w-5 h-5 text-sky-600" />
-                    <span className="truncate">jovial-strudel-cc47b0.netlify.app</span>
+                    <Globe className="w-5 h-5 text-sky-600 shrink-0" />
+                    <a 
+                      href="https://elegant-piroshki-d8fe8a.netlify.app/" 
+                      target="_blank" 
+                      rel="noreferrer" 
+                      className="truncate text-blue-700 underline hover:text-blue-900"
+                    >
+                      elegant-piroshki-d8fe8a.netlify.app
+                    </a>
                   </div>
                   <p className="text-[11px] text-sky-700 mt-1">
-                    File build siap di-update ke Netlify untuk mengaktifkan sinkronisasi realtime ini.
+                    URL publik resmi untuk HP & laptop siswa. Buka link ini di HP siswa untuk tes realtime!
                   </p>
                 </div>
 
                 <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl">
-                  <div className="text-xs font-bold text-amber-800 uppercase tracking-wider mb-1">Live Update Stream</div>
+                  <div className="text-xs font-bold text-amber-800 uppercase tracking-wider mb-1">Live Cloud Stream</div>
                   <div className="text-base font-black text-amber-950 flex items-center gap-1.5">
                     <Radio className="w-4 h-4 text-amber-600 animate-pulse" />
-                    <span>onSnapshot Active</span>
+                    <span>onSnapshot Active (0 Detik Delay)</span>
                   </div>
-                  <p className="text-[11px] text-amber-700 mt-1">
-                    Skor, aktivasi babak, dan peringkat terkirim instan ~100ms ke semua layar.
-                  </p>
+                  <div className="mt-2 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleTestPing}
+                      className="px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-slate-950 rounded-lg text-xs font-bold shadow-sm transition"
+                    >
+                      Uji Ping Real-Time
+                    </button>
+                    {pingStatus && (
+                      <span className="text-[11px] font-bold text-slate-800 animate-fadeIn">
+                        {pingStatus}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -1225,13 +1257,13 @@ export const PanitiaDashboard: React.FC<PanitiaDashboardProps> = ({
                     <div className="flex gap-2">
                       <span className="w-5 h-5 rounded-full bg-amber-600 text-white font-bold flex items-center justify-center shrink-0 text-[11px]">3</span>
                       <div>
-                        <strong>Tarik Folder "dist":</strong> Buka <a href="https://app.netlify.com/drop" target="_blank" rel="noreferrer" className="text-blue-600 underline font-semibold">app.netlify.com/drop</a>, lalu <strong>drag & drop folder dist</strong> ke kotak yang tersedia.
+                        <strong>Tarik Folder "dist" ke Netlify Deploys:</strong> Buka <a href="https://app.netlify.com/sites/elegant-piroshki-d8fe8a/deploys" target="_blank" rel="noreferrer" className="text-blue-600 underline font-semibold">app.netlify.com/sites/elegant-piroshki-d8fe8a/deploys</a> (atau <a href="https://app.netlify.com/drop" target="_blank" rel="noreferrer" className="text-blue-600 underline font-semibold">app.netlify.com/drop</a>), lalu <strong>drag & drop folder dist</strong> ke kotak putus-putus di bagian bawah.
                       </div>
                     </div>
                     <div className="flex gap-2">
                       <span className="w-5 h-5 rounded-full bg-amber-600 text-white font-bold flex items-center justify-center shrink-0 text-[11px]">4</span>
                       <div>
-                        <strong>Selesai!</strong> Web langsung live dalam hitungan detik dan siap dibagikan ke siswa!
+                        <strong>Selesai (Update Live ~10 Detik)!</strong> Situs <code className="bg-amber-100 font-bold px-1 rounded text-emerald-800">elegant-piroshki-d8fe8a.netlify.app</code> langsung diperbarui dengan teknologi Firebase Cloud Realtime, tanpa mengubah link!
                       </div>
                     </div>
                   </div>

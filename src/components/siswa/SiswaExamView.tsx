@@ -1,18 +1,19 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import confetti from 'canvas-confetti';
 import { 
   Trophy, Award, BookOpen, Calculator, CheckCircle2, AlertCircle, 
   ChevronRight, ChevronLeft, LogOut, ZoomIn, X, Send, Sparkles, 
-  HelpCircle, Check, Flame, Clock, RefreshCw, Star
+  HelpCircle, Check, Flame, Clock, RefreshCw, Star, Wifi, Bell
 } from 'lucide-react';
 import { Question, StageId, Student, LeaderboardRank } from '../../types';
-import { submitStudentAnswer, finishStudentStage, fetchLeaderboard } from '../../services/api';
+import { submitStudentAnswer, finishStudentStage, fetchLeaderboard, getStudentStageSubmissions } from '../../services/api';
 
 interface SiswaExamViewProps {
   student: Student;
   activeStageId: StageId;
   stages: Record<StageId, any>;
   questions: Question[];
+  leaderboard?: LeaderboardRank[];
   onLogout: () => void;
   onRefreshState: () => void;
 }
@@ -22,6 +23,7 @@ export const SiswaExamView: React.FC<SiswaExamViewProps> = ({
   activeStageId,
   stages,
   questions,
+  leaderboard = [],
   onLogout,
   onRefreshState,
 }) => {
@@ -40,6 +42,10 @@ export const SiswaExamView: React.FC<SiswaExamViewProps> = ({
   // Current accumulated score
   const [currentScore, setCurrentScore] = useState<number>(0);
   
+  // Realtime Stage Change Notification
+  const [stageChangeNotification, setStageChangeNotification] = useState<string | null>(null);
+  const prevStageIdRef = useRef<StageId>(activeStageId);
+
   // Realtime Question Result Popup Modal (Requirement 6)
   const [showQuestionResultModal, setShowQuestionResultModal] = useState(false);
   const [lastSubmissionResult, setLastSubmissionResult] = useState<{
@@ -53,7 +59,7 @@ export const SiswaExamView: React.FC<SiswaExamViewProps> = ({
 
   // Stage Completion Screen (Requirement 6)
   const [isStageFinished, setIsStageFinished] = useState(false);
-  const [stageLeaderboard, setStageLeaderboard] = useState<LeaderboardRank[]>([]);
+  const [stageLeaderboard, setStageLeaderboard] = useState<LeaderboardRank[]>(leaderboard);
   const [myFinalRank, setMyFinalRank] = useState<LeaderboardRank | null>(null);
 
   // UI helpers
@@ -65,18 +71,36 @@ export const SiswaExamView: React.FC<SiswaExamViewProps> = ({
   useEffect(() => {
     setCurrentIndex(0);
     setIsStageFinished(false);
-    // Check if student completed this stage
-    fetchLeaderboard(activeStageId)
-      .then(ranks => {
-        setStageLeaderboard(ranks);
-        const myRank = ranks.find(r => r.studentId === student.id);
-        if (myRank) {
-          setCurrentScore(myRank.totalScore);
-          setMyFinalRank(myRank);
+
+    // Detect if stage changed live by Panitia
+    if (prevStageIdRef.current !== activeStageId) {
+      setStageChangeNotification(`Panitia telah mengaktifkan ${stages[activeStageId]?.name || activeStageId}! Lembar soal telah diperbarui.`);
+      prevStageIdRef.current = activeStageId;
+    }
+
+    // Restore any existing submissions from Firestore for this student and stage
+    getStudentStageSubmissions(student.id, activeStageId)
+      .then(res => {
+        if (res.submittedQuestionIds.length > 0) {
+          setAnswers(prev => ({ ...prev, ...res.answers }));
+          setSubmittedQuestionIds(res.submittedQuestionIds);
+          setCurrentScore(res.totalScore);
         }
       })
       .catch(() => {});
-  }, [activeStageId, student.id]);
+  }, [activeStageId, student.id, stages]);
+
+  // Real-time synchronization when leaderboard prop updates from Firestore
+  useEffect(() => {
+    if (leaderboard && leaderboard.length > 0) {
+      setStageLeaderboard(leaderboard);
+      const myRank = leaderboard.find(r => r.studentId === student.id);
+      if (myRank) {
+        setCurrentScore(myRank.totalScore);
+        setMyFinalRank(myRank);
+      }
+    }
+  }, [leaderboard, student.id]);
 
   // Trigger celebration confetti when stage finishes
   useEffect(() => {
@@ -438,6 +462,22 @@ export const SiswaExamView: React.FC<SiswaExamViewProps> = ({
       {/* QUESTION WORKSPACE */}
       <main className="max-w-4xl mx-auto w-full p-3 sm:p-6 flex-1 space-y-4">
         
+        {/* Realtime Stage Change Notification from Panitia */}
+        {stageChangeNotification && (
+          <div className="bg-amber-400 text-slate-950 p-3.5 rounded-2xl font-bold text-xs sm:text-sm flex items-center justify-between gap-2 shadow-lg animate-fadeIn border-2 border-amber-300">
+            <div className="flex items-center gap-2">
+              <Bell className="w-5 h-5 text-slate-950 shrink-0 animate-bounce" />
+              <span>{stageChangeNotification}</span>
+            </div>
+            <button
+              onClick={() => setStageChangeNotification(null)}
+              className="text-xs bg-black/10 hover:bg-black/20 px-2.5 py-1 rounded-lg shrink-0 font-extrabold"
+            >
+              OK, Mengerti
+            </button>
+          </div>
+        )}
+
         {currentQuestion && (
           <div className="bg-white rounded-3xl shadow-md border border-slate-200 overflow-hidden">
             

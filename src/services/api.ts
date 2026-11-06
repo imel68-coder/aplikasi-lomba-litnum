@@ -295,6 +295,55 @@ export async function loginUser(
 // STUDENT SUBMISSION
 // ====================================================
 
+export async function getStudentStageSubmissions(studentId: string, stageId: StageId): Promise<{
+  answers: Record<string, any>;
+  submittedQuestionIds: string[];
+  totalScore: number;
+}> {
+  const result: {
+    answers: Record<string, any>;
+    submittedQuestionIds: string[];
+    totalScore: number;
+  } = {
+    answers: {},
+    submittedQuestionIds: [],
+    totalScore: 0
+  };
+
+  try {
+    // 1. Look in cachedDb first
+    const localSubs = cachedDb.submissions.filter(
+      s => s.studentId === studentId && s.stageId === stageId
+    );
+
+    if (localSubs.length > 0) {
+      localSubs.forEach(s => {
+        result.answers[s.questionId] = s.answer;
+        result.submittedQuestionIds.push(s.questionId);
+        result.totalScore += s.scoreEarned;
+      });
+      return result;
+    }
+
+    // 2. Query Firestore submissions
+    const subSnaps = await getDocs(collection(db, 'submissions'));
+    subSnaps.forEach(docSnap => {
+      const s = docSnap.data() as AnswerSubmission;
+      if (s.studentId === studentId && s.stageId === stageId) {
+        result.answers[s.questionId] = s.answer;
+        if (!result.submittedQuestionIds.includes(s.questionId)) {
+          result.submittedQuestionIds.push(s.questionId);
+        }
+        result.totalScore += s.scoreEarned;
+      }
+    });
+  } catch (err) {
+    console.warn('Error fetching student stage submissions:', err);
+  }
+
+  return result;
+}
+
 export async function submitStudentAnswer(payload: {
   studentId: string;
   stageId: StageId;
@@ -309,8 +358,31 @@ export async function submitStudentAnswer(payload: {
   totalParticipants: number;
   topLeaderboard: LeaderboardRank[];
 }> {
-  const question = cachedDb.questions.find(q => q.id === payload.questionId);
-  const student = cachedDb.students.find(s => s.id === payload.studentId);
+  let question = cachedDb.questions.find(q => q.id === payload.questionId);
+  if (!question) {
+    question = initialQuestions.find(q => q.id === payload.questionId);
+  }
+  if (!question) {
+    try {
+      const qDoc = await getDoc(doc(db, 'questions', payload.questionId));
+      if (qDoc.exists()) question = qDoc.data() as Question;
+    } catch {
+      // fallback
+    }
+  }
+
+  let student = cachedDb.students.find(s => s.id === payload.studentId);
+  if (!student) {
+    student = initialStudents.find(s => s.id === payload.studentId);
+  }
+  if (!student) {
+    try {
+      const sDoc = await getDoc(doc(db, 'students', payload.studentId));
+      if (sDoc.exists()) student = sDoc.data() as Student;
+    } catch {
+      // fallback
+    }
+  }
 
   if (!question || !student) {
     throw new Error('Soal atau Siswa tidak ditemukan');
@@ -725,6 +797,15 @@ export function getServerStatus(): boolean {
 // This powers the instantaneous real-time sync between Panitia laptop & Student phones!
 // ====================================================
 
+// Ping test for real-time latency verification
+export async function sendRealtimePing(): Promise<number> {
+  const timestamp = Date.now();
+  await setDoc(doc(db, 'app_state', 'main'), {
+    lastPing: timestamp
+  }, { merge: true });
+  return timestamp;
+}
+
 export function subscribeToRealtimeUpdates(onEvent: (event: { type: string; data: any }) => void) {
   const unsubscribers: (() => void)[] = [];
 
@@ -755,7 +836,9 @@ export function subscribeToRealtimeUpdates(onEvent: (event: { type: string; data
           data: {
             activeStageId: cachedDb.activeStageId,
             stages: cachedDb.stages,
-            leaderboard: currentLeaderboard
+            announcement: cachedDb.announcement,
+            leaderboard: currentLeaderboard,
+            lastPing: data.lastPing
           }
         });
       }
