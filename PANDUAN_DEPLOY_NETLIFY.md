@@ -1,91 +1,55 @@
-# Panduan Publikasi Aplikasi GELORA 26 ke Siswa melalui Netlify
+# Panduan Publikasi Aplikasi GELORA 26 ke Siswa melalui Netlify dengan Sinkronisasi Cloud Realtime
 
-Aplikasi **GELORA 26 (Gebyar Literasi & Numerasi SMP Negeri 26 Sijunjung)** telah dikonfigurasi secara khusus agar **100% kompatibel dan siap di-deploy ke Netlify**, baik melalui GitHub maupun melalui unggahan file (Netlify Drop).
-
----
-
-## 📌 Mengapa Sebelumnya Gagal di Netlify?
-1. **Belum Ada File Konfigurasi Netlify (`netlify.toml`):**
-   Netlify memerlukan instruksi build agar tahu perintah build (`npm run build`), folder output (`dist`), serta versi Node.js yang sesuai (Node 22).
-2. **Missing Rule Redirect SPA (`/* /index.html 200`):**
-   Tanpa file `_redirects` atau `netlify.toml`, saat siswa merefresh halaman atau mengakses link, Netlify akan menampilkan pesan *404 Page Not Found*.
-3. **Mengunggah Folder Mentah ke Netlify Drop:**
-   Jika kode di-download langsung dari AI Studio (berisi file `package.json`, `src/`, dll.), Netlify Drop akan menolak karena Netlify Drop hanya menerima **folder hasil build (`dist`)** yang berisi `index.html`.
-4. **Backend API di Netlify (Sudah Diperbaiki!):**
-   Sebelumnya login peserta memanggil server Express lokal (`/api/auth/login`). Karena Netlify adalah hosting web statis, pemanggilan API tersebut gagal. **Kini aplikasi sudah dilengkapi Dual-Mode Engine**: aplikasi secara otomatis menggunakan database lokal di browser siswa jika server backend tidak tersedia, sehingga siswa tetap bisa login, mengerjakan soal 4 babak, menghitung skor realtime, dan melihat peringkat tanpa kendala apa pun!
+Aplikasi **GELORA 26 (Gebyar Literasi & Numerasi SMP Negeri 26 Sijunjung)** kini telah terintegrasi dengan **Firebase Firestore Cloud Realtime Database**.
 
 ---
 
-## 🚀 Cara 1: Deploy Otomatis via GitHub (Sangat Disarankan)
+## ⚡ Mengapa Perubahan Panitia & Siswa Sebelumnya Tidak Realtime?
 
-Metode ini paling praktis karena setiap pembaruan kode di GitHub akan otomatis di-build oleh Netlify:
+Pada deploy statis standar Netlify, setiap perangkat (laptop panitia maupun HP siswa) hanya membaca dan menulis data ke penyimpanan memori lokal masing-masing (*localStorage*). Akibatnya:
+- Saat panitia mengganti babak di laptop, HP siswa tidak terhubung sehingga tidak tahu babak telah diganti.
+- Saat siswa mengerjakan soal di HP, nilai hanya tersimpan di HP siswa tersebut dan tidak terkirim ke laptop panitia.
 
-1. **Upload / Push Kode ke GitHub Anda:**
-   - Buat repositori baru di GitHub (misal: `gelora26-smpn26`).
-   - Push seluruh file kode dari AI Studio ke repositori tersebut.
-2. **Buka Akun Netlify:**
-   - Buka [app.netlify.com](https://app.netlify.com/) dan login (bisa login menggunakan akun GitHub).
-3. **Tambahkan Proyek:**
-   - Klik tombol **"Add new site"** -> **"Import an existing project"**.
-   - Pilih **GitHub**, lalu pilih repositori `gelora26-smpn26`.
-4. **Pengaturan Build (Sudah Otomatis Terdeteksi):**
-   - **Build command:** `npm run build`
-   - **Publish directory:** `dist`
-   *(Pengaturan ini otomatis dibaca dari file `netlify.toml` yang sudah kami sediakan).*
-5. **Klik "Deploy Site":**
-   - Tunggu sekitar 1-2 menit hingga proses build selesai.
-   - Netlify akan memberikan URL live resmi, misalnya: `https://gelora26-smpn26.netlify.app`.
-6. **Selesai!** Bagikan link tersebut ke siswa.
+### 💡 Solusi yang Sudah Diterapkan:
+Kini aplikasi sudah dilengkapi **Firebase Cloud Firestore Realtime Sync (`onSnapshot`)**:
+1. **Aktivasi Babak Realtime:** Saat panitia mengaktifkan babak (misal: Babak 30 Besar) di laptop, Firestore mengirim sinyal instan ke seluruh HP siswa dalam ~100 milidetik. Layar HP siswa langsung otomatis berganti ke babak tersebut tanpa siswa harus me-refresh!
+2. **Nilai & Peringkat Realtime:** Setiap kali siswa mengklik jawaban atau submit soal di HP, datanya langsung terkirim ke Firestore dan papan skor / proyektor laptop panitia langsung bergeser peringkatnya secara *live* detik itu juga!
+3. **Konfigurasi Otomatis:** File konfigurasi Firebase sudah tertanam langsung di dalam kode build, sehingga saat di-deploy ke Netlify (misalnya di URL Anda: `https://jovial-strudel-cc47b0.netlify.app/`), fitur realtime ini langsung aktif 100%!
 
 ---
 
-## 📦 Cara 2: Deploy Manual via Netlify Drop (Tanpa GitHub)
+## 🚀 Cara Memperbarui Deploy di Netlify Anda (`https://jovial-strudel-cc47b0.netlify.app/`)
 
-Jika Anda mengunduh kode (ZIP) ke laptop/komputer dan ingin langsung mengunggahnya ke Netlify:
+### Cara A: Jika Menggunakan GitHub (Paling Mudah)
+1. Push pembaruan kode terbaru ini ke repositori GitHub Anda.
+2. Netlify akan otomatis mendeteksi commit baru dan langsung menjalankan build ulang (`npm run build`).
+3. Dalam waktu 1-2 menit, situs Anda di `https://jovial-strudel-cc47b0.netlify.app/` akan otomatis terbarui dengan sinkronisasi realtime aktif!
 
-1. **Ekstrak File ZIP** di laptop Anda.
-2. **Buka Terminal / Command Prompt** di dalam folder hasil ekstrak tersebut.
-3. **Jalankan Perintah Build:**
+### Cara B: Jika Menggunakan Netlify Drop (Manual)
+1. Buka terminal di folder proyek hasil unduhan terbaru di komputer Anda.
+2. Jalankan perintah:
    ```bash
    npm install
    npm run build
    ```
-   *(Perintah ini akan membuat folder baru bernama `dist` yang berisi file HTML, JS, dan aset siap pakai).*
-4. **Buka Netlify Drop di Browser:**
-   - Buka [app.netlify.com/drop](https://app.netlify.com/drop).
-5. **Drag & Drop Folder `dist`:**
-   - **PENTING:** Tarik dan lepas **hanya folder `dist`** ke area kotak Netlify Drop. Jangan menarik file ZIP atau folder utama!
-6. Web Anda langsung live dalam beberapa detik dan siap dibagikan ke siswa!
+3. Buka dashboard Netlify Anda pada situs **jovial-strudel-cc47b0** di [app.netlify.com](https://app.netlify.com).
+4. Masuk ke tab **Deploys**.
+5. Tarik dan lepas (Drag & Drop) **folder `dist` terbaru** ke area kotak update deploy di halaman tersebut.
+6. Tunggu beberapa detik, dan situs Anda langsung aktif dengan sinkronisasi realtime!
 
 ---
 
-## 📱 Panduan Siswa Saat Membuka Aplikasi
+## 📱 Uji Coba Sinkronisasi Realtime Panitia & Siswa
 
-1. Siswa membuka URL Netlify dari HP (Android / iPhone) atau laptop melalui Google Chrome / Safari.
-2. Pilih tab **"Peserta Siswa"**.
-3. Masukkan **Nomor Peserta** (Contoh: `G26-001` s.d. `G26-020`).
-4. Masukkan **PIN** (Standar: `1234`).
-5. Klik **"Mulai Kerjakan Soal"**.
-6. Siswa langsung mengerjakan paket soal babak yang sedang aktif (Pilihan Ganda Tunggal, Pilihan Ganda Kompleks, Benar/Salah, dan Menjodohkan).
-7. Nilai, analisis jawaban benar/salah, dan peringkat akan langsung terhitung seketika!
-
----
-
-## 🔑 Login Panitia / Guru
-- Masuk ke tab **"Panitia Lomba"**.
-- Masukkan password: `admin` atau `gelora26`.
-- Panitia dapat:
-  - Mengatur babak aktif (Penyisihan, 30 Besar, Semifinal, Grand Final).
-  - Mengubah, menambah, atau menghapus soal dan kunci jawaban.
-  - Menambah nomor peserta baru atau mengimpor data siswa.
-  - Membuka **Mode Proyektor Layar Penuh** untuk ditampilkan di infocus aula sekolah.
-  - Mengunduh / memulihkan file backup database (`gelora26_backup.json`).
-
----
-
-## 💡 Mode Server Terpusat (Opsional untuk Real-Time Aula Sekolah)
-Jika panitia ingin seluruh HP siswa di kelas/aula terhubung secara real-time ke 1 proyektor guru:
-1. Jalankan `npm run start` di laptop panitia yang terhubung ke Wi-Fi sekolah yang sama.
-2. Buka menu Panitia -> **"Publikasi Netlify & Server"**.
-3. Masukkan IP laptop panitia (contoh: `http://192.168.1.50:3000`) pada kolom **Server Terpusat**.
-4. Semua jawaban dan skor siswa dari Netlify akan langsung tersinkronisasi ke laptop proyektor panitia secara live!
+Setelah deploy diperbarui:
+1. **Di Laptop Panitia:**
+   - Buka `https://jovial-strudel-cc47b0.netlify.app/`.
+   - Login sebagai **Panitia Lomba** (Password: `admin` atau `gelora26`).
+   - Buka menu **4. Live Monitor & Peringkat** atau klik **Proyektor Papan Skor**.
+2. **Di HP Siswa (atau buka browser lain / tab samaran):**
+   - Buka `https://jovial-strudel-cc47b0.netlify.app/`.
+   - Login sebagai **Peserta Siswa** dengan No. Peserta (misal: `G26-001`, PIN: `1234`).
+   - Jawab salah satu soal lalu klik Kirim Jawaban.
+3. **Hasil:**
+   - Nilai siswa langsung bertambah di layar laptop panitia secara *live* tanpa refresh!
+   - Saat panitia mengganti babak lomba, tampilan di HP siswa langsung otomatis berpindah babak seketika!

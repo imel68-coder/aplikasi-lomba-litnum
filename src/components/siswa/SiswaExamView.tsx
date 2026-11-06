@@ -61,8 +61,10 @@ export const SiswaExamView: React.FC<SiswaExamViewProps> = ({
   const [zoomedImage, setZoomedImage] = useState<string | null>(null);
   const [fontSize, setFontSize] = useState<'normal' | 'large' | 'xlarge'>('normal');
 
-  // Load submissions and calculate existing score on initial load
+  // Load submissions and calculate existing score on initial load & stage changes
   useEffect(() => {
+    setCurrentIndex(0);
+    setIsStageFinished(false);
     // Check if student completed this stage
     fetchLeaderboard(activeStageId)
       .then(ranks => {

@@ -1,3 +1,15 @@
+import { 
+  collection, 
+  doc, 
+  getDoc, 
+  getDocs, 
+  setDoc, 
+  updateDoc, 
+  deleteDoc, 
+  onSnapshot, 
+  writeBatch
+} from 'firebase/firestore';
+import { db, bootstrapFirestoreIfEmpty } from './firebase';
 import { initialQuestions, initialStages, initialStudents } from '../seedData';
 import { 
   AnswerSubmission, 
@@ -9,112 +21,37 @@ import {
   StudentProgress 
 } from '../types';
 
-// Storage keys for local persistence & offline/Netlify standalone capability
-const LOCAL_DB_KEY = 'gelora26_offline_db_v2';
-const CUSTOM_SERVER_KEY = 'gelora26_custom_server_url';
+// Local storage key for offline fallback
+const LOCAL_DB_KEY = 'gelora26_offline_db_v3';
 
-export function getCustomServerUrl(): string {
-  try {
-    return localStorage.getItem(CUSTOM_SERVER_KEY) || '';
-  } catch {
-    return '';
-  }
+// Cache in-memory for instant rendering
+let cachedDb: AppDatabaseState = {
+  stages: initialStages,
+  students: initialStudents,
+  questions: initialQuestions,
+  submissions: [],
+  studentProgress: {},
+  adminPassword: 'admin',
+  activeStageId: 'penyisihan',
+  announcement: 'Selamat datang di Lomba Literasi dan Numerasi GELORA 26 SMPN 26 Sijunjung! Junjung tinggi kejujuran dan sportivitas.'
+};
+
+let isFirestoreConnected = false;
+
+export function getFirestoreSyncStatus(): boolean {
+  return isFirestoreConnected;
 }
 
-export function setCustomServerUrl(url: string) {
-  try {
-    if (!url.trim()) {
-      localStorage.removeItem(CUSTOM_SERVER_KEY);
-    } else {
-      localStorage.setItem(CUSTOM_SERVER_KEY, url.trim().replace(/\/+$/, ''));
-    }
-  } catch (e) {
-    console.error('Failed to save custom server URL', e);
-  }
-}
-
-export function getApiBase(): string {
-  const custom = getCustomServerUrl();
-  if (custom) return custom;
-  return '';
-}
-
-// Track whether the backend server is reachable
-let isServerOnline = true;
-
-export function getServerStatus(): boolean {
-  return isServerOnline;
-}
-
-// ==========================================
-// LOCAL DATABASE STORAGE ENGINE (For Netlify / Offline)
-// ==========================================
-
-export function loadLocalDatabase(): AppDatabaseState {
-  try {
-    const raw = localStorage.getItem(LOCAL_DB_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && parsed.students && parsed.questions && parsed.stages) {
-        return parsed;
-      }
-    }
-  } catch (e) {
-    console.warn('Error reading local database, resetting to seed data', e);
-  }
-
-  const initialState: AppDatabaseState = {
-    stages: initialStages,
-    students: initialStudents,
-    questions: initialQuestions,
-    submissions: [],
-    studentProgress: {},
-    adminPassword: 'admin',
-    activeStageId: 'penyisihan',
-    announcement: 'Selamat datang di Lomba Literasi dan Numerasi GELORA 26 SMPN 26 Sijunjung! Junjung tinggi kejujuran dan sportivitas.'
-  };
-
-  saveLocalDatabase(initialState);
-  return initialState;
-}
-
-export function saveLocalDatabase(db: AppDatabaseState) {
-  try {
-    localStorage.setItem(LOCAL_DB_KEY, JSON.stringify(db));
-    dispatchLocalSyncEvent('STATE_UPDATED', { activeStageId: db.activeStageId });
-  } catch (e) {
-    console.error('Failed to save local database', e);
-  }
-}
-
-// Broadcast updates across browser tabs (for Netlify / Standalone mode)
-let broadcastChannel: BroadcastChannel | null = null;
-try {
-  if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-    broadcastChannel = new BroadcastChannel('gelora26_channel');
-  }
-} catch {
-  // ignore
-}
-
-function dispatchLocalSyncEvent(type: string, data: any) {
-  const eventPayload = { type, data, timestamp: Date.now() };
-  try {
-    broadcastChannel?.postMessage(eventPayload);
-  } catch {
-    // ignore
-  }
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('gelora26_local_sync', { detail: eventPayload }));
-  }
-}
-
-// Compute stage leaderboard client-side
-export function computeLocalStageLeaderboard(db: AppDatabaseState, stageId: StageId): LeaderboardRank[] {
+// Compute leaderboard ranks from students and submissions
+export function computeLeaderboard(
+  students: Student[], 
+  submissions: AnswerSubmission[], 
+  stageId: StageId
+): LeaderboardRank[] {
   const hierarchy: StageId[] = ['penyisihan', 'top30', 'semifinal', 'final'];
   const targetStageIndex = hierarchy.indexOf(stageId);
 
-  const validStudents = db.students.filter(s => {
+  const validStudents = students.filter(s => {
     const studentStageIndex = hierarchy.indexOf(s.qualifiedStage);
     return studentStageIndex >= targetStageIndex;
   });
@@ -124,7 +61,7 @@ export function computeLocalStageLeaderboard(db: AppDatabaseState, stageId: Stag
     studentStats[st.id] = { totalScore: 0, totalAnswered: 0, correctCount: 0, lastSubmitTime: 0 };
   });
 
-  (db.submissions || [])
+  submissions
     .filter(sub => sub.stageId === stageId)
     .forEach(sub => {
       if (!studentStats[sub.studentId]) {
@@ -169,23 +106,9 @@ export function computeLocalStageLeaderboard(db: AppDatabaseState, stageId: Stag
   return ranked;
 }
 
-// Timeout helper for resilient network calls
-async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 2500): Promise<Response> {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    clearTimeout(id);
-    return res;
-  } catch (err) {
-    clearTimeout(id);
-    throw err;
-  }
-}
-
-// ==========================================
-// CORE APPLICATION API METHODS (Dual-Mode Server & Netlify Standalone)
-// ==========================================
+// ====================================================
+// CORE APP STATE
+// ====================================================
 
 export async function fetchAppState(): Promise<{
   activeStageId: StageId;
@@ -196,85 +119,121 @@ export async function fetchAppState(): Promise<{
   announcement?: string;
   leaderboard: LeaderboardRank[];
 }> {
-  const apiBase = getApiBase();
-
-  // Try fetching from server first
   try {
-    const res = await fetchWithTimeout(`${apiBase}/api/state`, {}, 2500);
-    const contentType = res.headers.get('content-type') || '';
-    if (res.ok && contentType.includes('application/json')) {
-      const data = await res.json();
-      isServerOnline = true;
-      // Sync local database with latest server state as cache
-      saveLocalDatabase({
-        stages: data.stages,
-        students: data.students,
-        questions: data.questions,
-        submissions: data.submissions || [],
-        studentProgress: {},
-        adminPassword: 'admin',
-        activeStageId: data.activeStageId,
-        announcement: data.announcement
-      });
-      return data;
+    // Ensure initial data exists in Firestore
+    await bootstrapFirestoreIfEmpty();
+
+    // 1. Fetch App State
+    const stateDoc = await getDoc(doc(db, 'app_state', 'main'));
+    let activeStageId: StageId = 'penyisihan';
+    let stages = initialStages;
+    let announcement = 'Selamat datang di GELORA 26 SMPN 26 Sijunjung!';
+
+    if (stateDoc.exists()) {
+      const data = stateDoc.data();
+      if (data.activeStageId) activeStageId = data.activeStageId;
+      if (data.stages) stages = data.stages;
+      if (data.announcement) announcement = data.announcement;
+    }
+
+    // 2. Fetch Students
+    const studentSnaps = await getDocs(collection(db, 'students'));
+    const students: Student[] = [];
+    studentSnaps.forEach(docSnap => {
+      students.push(docSnap.data() as Student);
+    });
+
+    // 3. Fetch Questions
+    const questionSnaps = await getDocs(collection(db, 'questions'));
+    const questions: Question[] = [];
+    questionSnaps.forEach(docSnap => {
+      questions.push(docSnap.data() as Question);
+    });
+
+    // 4. Fetch Submissions
+    const subSnaps = await getDocs(collection(db, 'submissions'));
+    const submissions: AnswerSubmission[] = [];
+    subSnaps.forEach(docSnap => {
+      submissions.push(docSnap.data() as AnswerSubmission);
+    });
+
+    // Compute active leaderboard
+    const activeLeaderboard = computeLeaderboard(
+      students.length ? students : initialStudents,
+      submissions,
+      activeStageId
+    );
+
+    // Update in-memory cache
+    cachedDb = {
+      stages: Object.keys(stages).length ? stages : initialStages,
+      students: students.length ? students : initialStudents,
+      questions: questions.length ? questions : initialQuestions,
+      submissions,
+      studentProgress: {},
+      adminPassword: 'admin',
+      activeStageId,
+      announcement
+    };
+
+    try {
+      localStorage.setItem(LOCAL_DB_KEY, JSON.stringify(cachedDb));
+    } catch {
+      // ignore
+    }
+
+    isFirestoreConnected = true;
+
+    return {
+      activeStageId,
+      stages: cachedDb.stages,
+      students: cachedDb.students,
+      questions: cachedDb.questions,
+      submissions: cachedDb.submissions,
+      announcement: cachedDb.announcement,
+      leaderboard: activeLeaderboard
+    };
+  } catch (err) {
+    console.warn('Could not fetch from Firestore, using cached/local data:', err);
+    isFirestoreConnected = false;
+    const local = loadLocalFallback();
+    const leaderboard = computeLeaderboard(local.students, local.submissions || [], local.activeStageId);
+    return {
+      activeStageId: local.activeStageId,
+      stages: local.stages,
+      students: local.students,
+      questions: local.questions,
+      submissions: local.submissions || [],
+      announcement: local.announcement,
+      leaderboard
+    };
+  }
+}
+
+function loadLocalFallback(): AppDatabaseState {
+  try {
+    const raw = localStorage.getItem(LOCAL_DB_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.students && parsed.questions) return parsed;
     }
   } catch {
-    // Server is unreachable, seamlessly fall back to local storage
+    // ignore
   }
-
-  isServerOnline = false;
-  const localDb = loadLocalDatabase();
-  const localLeaderboard = computeLocalStageLeaderboard(localDb, localDb.activeStageId);
-
-  return {
-    activeStageId: localDb.activeStageId,
-    stages: localDb.stages,
-    students: localDb.students,
-    questions: localDb.questions,
-    submissions: localDb.submissions || [],
-    announcement: localDb.announcement,
-    leaderboard: localLeaderboard
-  };
+  return cachedDb;
 }
+
+// ====================================================
+// AUTHENTICATION
+// ====================================================
 
 export async function loginUser(
   role: 'admin' | 'student',
   payload: { noPeserta?: string; pin?: string; password?: string }
 ): Promise<{ success: boolean; role: 'admin' | 'student'; user: any }> {
-  const apiBase = getApiBase();
-
-  // If server was available, try server login
-  if (isServerOnline) {
-    try {
-      const res = await fetchWithTimeout(`${apiBase}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role, ...payload }),
-      }, 3000);
-
-      const contentType = res.headers.get('content-type') || '';
-      if (res.ok && contentType.includes('application/json')) {
-        return await res.json();
-      }
-      if (!res.ok && contentType.includes('application/json')) {
-        const errData = await res.json();
-        throw new Error(errData.message || 'Login gagal');
-      }
-    } catch (err: any) {
-      if (err.message && !err.message.includes('fetch') && !err.message.includes('abort')) {
-        throw err;
-      }
-      // If network failure, fall back to local verification below
-      isServerOnline = false;
-    }
-  }
-
-  // Local verification (Netlify / Offline mode)
-  const db = loadLocalDatabase();
-
   if (role === 'admin') {
     const pass = (payload.password || '').trim();
-    if (pass === db.adminPassword || pass === 'admin' || pass === 'gelora26') {
+    if (pass === 'admin' || pass === 'gelora26' || pass === cachedDb.adminPassword) {
       return {
         success: true,
         role: 'admin',
@@ -285,13 +244,39 @@ export async function loginUser(
   }
 
   if (role === 'student') {
-    const inputNo = (payload.noPeserta || '').trim().toLowerCase();
-    const student = db.students.find(s => s.noPeserta.trim().toLowerCase() === inputNo);
+    const inputNo = (payload.noPeserta || '').trim().toUpperCase();
+    const inputPin = (payload.pin || '').trim();
+
+    // Check in cached students or fetch directly from Firestore
+    let student = cachedDb.students.find(
+      s => s.noPeserta.trim().toUpperCase() === inputNo
+    );
+
     if (!student) {
-      throw new Error(`Nomor Peserta "${payload.noPeserta}" tidak ditemukan. Cek daftar nomor peserta.`);
+      try {
+        const studentSnaps = await getDocs(collection(db, 'students'));
+        studentSnaps.forEach(docSnap => {
+          const st = docSnap.data() as Student;
+          if (st.noPeserta.trim().toUpperCase() === inputNo) {
+            student = st;
+          }
+        });
+      } catch {
+        // fallback
+      }
     }
 
-    const inputPin = (payload.pin || '').trim();
+    if (!student) {
+      // Also check initialStudents as fallback
+      student = initialStudents.find(
+        s => s.noPeserta.trim().toUpperCase() === inputNo
+      );
+    }
+
+    if (!student) {
+      throw new Error(`Nomor Peserta "${payload.noPeserta}" tidak ditemukan.`);
+    }
+
     if (inputPin && student.pin && inputPin !== student.pin && inputPin !== '1234') {
       throw new Error('PIN Peserta tidak cocok. (Default: 1234)');
     }
@@ -305,6 +290,10 @@ export async function loginUser(
 
   throw new Error('Role tidak valid');
 }
+
+// ====================================================
+// STUDENT SUBMISSION
+// ====================================================
 
 export async function submitStudentAnswer(payload: {
   studentId: string;
@@ -320,34 +309,14 @@ export async function submitStudentAnswer(payload: {
   totalParticipants: number;
   topLeaderboard: LeaderboardRank[];
 }> {
-  const apiBase = getApiBase();
-
-  if (isServerOnline) {
-    try {
-      const res = await fetchWithTimeout(`${apiBase}/api/submit-answer`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      }, 3500);
-
-      const contentType = res.headers.get('content-type') || '';
-      if (res.ok && contentType.includes('application/json')) {
-        return await res.json();
-      }
-    } catch {
-      isServerOnline = false;
-    }
-  }
-
-  // Local processing (Netlify Standalone Engine)
-  const db = loadLocalDatabase();
-  const question = db.questions.find(q => q.id === payload.questionId);
-  const student = db.students.find(s => s.id === payload.studentId);
+  const question = cachedDb.questions.find(q => q.id === payload.questionId);
+  const student = cachedDb.students.find(s => s.id === payload.studentId);
 
   if (!question || !student) {
     throw new Error('Soal atau Siswa tidak ditemukan');
   }
 
+  // Evaluate answer
   let isCorrect = false;
   let scoreEarned = 0;
   const maxPoints = question.points || 10;
@@ -400,13 +369,10 @@ export async function submitStudentAnswer(payload: {
     }
   }
 
-  if (!db.submissions) db.submissions = [];
-  const existingIndex = db.submissions.findIndex(
-    sub => sub.studentId === payload.studentId && sub.stageId === payload.stageId && sub.questionId === payload.questionId
-  );
-
+  // Create submission object with deterministic ID per question to allow updates
+  const submissionId = `${payload.studentId}_${payload.stageId}_${payload.questionId}`;
   const submission: AnswerSubmission = {
-    id: `sub_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    id: submissionId,
     studentId: payload.studentId,
     stageId: payload.stageId,
     questionId: payload.questionId,
@@ -417,54 +383,49 @@ export async function submitStudentAnswer(payload: {
     submittedAt: Date.now()
   };
 
-  if (existingIndex >= 0) {
-    db.submissions[existingIndex] = submission;
+  // Update in-memory cache
+  const existingSubIdx = cachedDb.submissions.findIndex(s => s.id === submissionId);
+  if (existingSubIdx >= 0) {
+    cachedDb.submissions[existingSubIdx] = submission;
   } else {
-    db.submissions.push(submission);
+    cachedDb.submissions.push(submission);
   }
 
-  if (!db.studentProgress) db.studentProgress = {};
-  const progressKey = `${payload.studentId}_${payload.stageId}`;
-  if (!db.studentProgress[progressKey]) {
-    db.studentProgress[progressKey] = {
+  // Write to Firebase Firestore in real-time
+  try {
+    await setDoc(doc(db, 'submissions', submissionId), submission);
+    
+    // Also update progress document
+    const progressId = `${payload.studentId}_${payload.stageId}`;
+    const studentSubmissions = cachedDb.submissions.filter(
+      s => s.studentId === payload.studentId && s.stageId === payload.stageId
+    );
+    const totalScore = studentSubmissions.reduce((sum, s) => sum + s.scoreEarned, 0);
+    const completedQuestionIds = Array.from(new Set(studentSubmissions.map(s => s.questionId)));
+
+    await setDoc(doc(db, 'student_progress', progressId), {
       studentId: payload.studentId,
       stageId: payload.stageId,
-      completedQuestionIds: [payload.questionId],
-      totalScore: scoreEarned,
-      isFinished: false
-    };
-  } else {
-    const prog = db.studentProgress[progressKey];
-    if (!prog.completedQuestionIds.includes(payload.questionId)) {
-      prog.completedQuestionIds.push(payload.questionId);
-    }
-    prog.totalScore = db.submissions
-      .filter(s => s.studentId === payload.studentId && s.stageId === payload.stageId)
-      .reduce((sum, s) => sum + s.scoreEarned, 0);
+      completedQuestionIds,
+      totalScore,
+      isFinished: false,
+      lastUpdatedAt: Date.now()
+    }, { merge: true });
+  } catch (err) {
+    console.warn('Error syncing submission to Firestore:', err);
   }
 
-  saveLocalDatabase(db);
-
-  const updatedLeaderboard = computeLocalStageLeaderboard(db, payload.stageId);
+  // Compute live ranks
+  const updatedLeaderboard = computeLeaderboard(cachedDb.students, cachedDb.submissions, payload.stageId);
   const myRankEntry = updatedLeaderboard.find(r => r.studentId === payload.studentId);
   const currentRank = myRankEntry ? myRankEntry.rank : 1;
-  const totalScore = myRankEntry ? myRankEntry.totalScore : scoreEarned;
-
-  dispatchLocalSyncEvent('SUBMISSION_RECEIVED', {
-    studentId: payload.studentId,
-    stageId: payload.stageId,
-    studentName: student.nama,
-    scoreEarned,
-    newTotalScore: totalScore,
-    rank: currentRank,
-    leaderboard: updatedLeaderboard
-  });
+  const studentTotalScore = myRankEntry ? myRankEntry.totalScore : scoreEarned;
 
   return {
     success: true,
     isCorrect,
     scoreEarned,
-    totalScore,
+    totalScore: studentTotalScore,
     currentRank,
     totalParticipants: updatedLeaderboard.length,
     topLeaderboard: updatedLeaderboard.slice(0, 5)
@@ -476,53 +437,18 @@ export async function finishStudentStage(studentId: string, stageId: StageId): P
   myRank?: LeaderboardRank;
   leaderboard: LeaderboardRank[];
 }> {
-  const apiBase = getApiBase();
-
-  if (isServerOnline) {
-    try {
-      const res = await fetchWithTimeout(`${apiBase}/api/finish-stage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ studentId, stageId }),
-      }, 3500);
-
-      const contentType = res.headers.get('content-type') || '';
-      if (res.ok && contentType.includes('application/json')) {
-        return await res.json();
-      }
-    } catch {
-      isServerOnline = false;
-    }
-  }
-
-  const db = loadLocalDatabase();
-  const progressKey = `${studentId}_${stageId}`;
-  if (!db.studentProgress) db.studentProgress = {};
-
-  if (db.studentProgress[progressKey]) {
-    db.studentProgress[progressKey].isFinished = true;
-    db.studentProgress[progressKey].finishedAt = Date.now();
-  } else {
-    db.studentProgress[progressKey] = {
-      studentId,
-      stageId,
-      completedQuestionIds: [],
-      totalScore: 0,
+  const progressId = `${studentId}_${stageId}`;
+  try {
+    await setDoc(doc(db, 'student_progress', progressId), {
       isFinished: true,
       finishedAt: Date.now()
-    };
+    }, { merge: true });
+  } catch (err) {
+    console.warn('Error updating finish stage in Firestore:', err);
   }
 
-  saveLocalDatabase(db);
-  const finalLeaderboard = computeLocalStageLeaderboard(db, stageId);
+  const finalLeaderboard = computeLeaderboard(cachedDb.students, cachedDb.submissions, stageId);
   const myRank = finalLeaderboard.find(r => r.studentId === studentId);
-
-  dispatchLocalSyncEvent('STUDENT_FINISHED', {
-    studentId,
-    stageId,
-    finalRank: myRank?.rank || 1,
-    totalScore: myRank?.totalScore || 0
-  });
 
   return {
     success: true,
@@ -532,77 +458,47 @@ export async function finishStudentStage(studentId: string, stageId: StageId): P
 }
 
 export async function fetchLeaderboard(stageId: StageId): Promise<LeaderboardRank[]> {
-  const apiBase = getApiBase();
-
-  if (isServerOnline) {
-    try {
-      const res = await fetchWithTimeout(`${apiBase}/api/leaderboard/${stageId}`, {}, 2500);
-      const contentType = res.headers.get('content-type') || '';
-      if (res.ok && contentType.includes('application/json')) {
-        return await res.json();
-      }
-    } catch {
-      isServerOnline = false;
-    }
-  }
-
-  const db = loadLocalDatabase();
-  return computeLocalStageLeaderboard(db, stageId);
+  return computeLeaderboard(cachedDb.students, cachedDb.submissions, stageId);
 }
 
-// ==========================================
-// PANITIA (ADMIN) API CALLS
-// ==========================================
+// ====================================================
+// PANITIA (ADMIN) OPERATIONS WITH FIRESTORE REALTIME SYNC
+// ====================================================
 
 export async function adminActivateStage(stageId: StageId) {
-  const apiBase = getApiBase();
+  // Update local stages config
+  const newStages = { ...cachedDb.stages };
+  Object.keys(newStages).forEach(k => {
+    newStages[k as StageId] = {
+      ...newStages[k as StageId],
+      isActive: (k === stageId)
+    };
+  });
 
-  if (isServerOnline) {
-    try {
-      const res = await fetchWithTimeout(`${apiBase}/api/admin/stage/activate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stageId }),
-      }, 3000);
-      if (res.ok) return await res.json();
-    } catch {
-      isServerOnline = false;
-    }
+  cachedDb.activeStageId = stageId;
+  cachedDb.stages = newStages;
+
+  // Sync to Firestore in real-time -> triggers onSnapshot on all student phones!
+  try {
+    await setDoc(doc(db, 'app_state', 'main'), {
+      activeStageId: stageId,
+      stages: newStages,
+      updatedAt: Date.now()
+    }, { merge: true });
+  } catch (err) {
+    console.warn('Firestore update stage error:', err);
   }
 
-  const db = loadLocalDatabase();
-  Object.keys(db.stages).forEach(k => {
-    db.stages[k as StageId].isActive = (k === stageId);
-  });
-  db.activeStageId = stageId;
-  saveLocalDatabase(db);
-  dispatchLocalSyncEvent('STAGE_ACTIVATED', { activeStageId: stageId, stage: db.stages[stageId] });
-  return { success: true, activeStageId: stageId, stages: db.stages };
+  return { success: true, activeStageId: stageId, stages: newStages };
 }
 
 export async function adminPromoteStudents(fromStageId: StageId, toStageId: StageId, quota?: number) {
-  const apiBase = getApiBase();
-
-  if (isServerOnline) {
-    try {
-      const res = await fetchWithTimeout(`${apiBase}/api/admin/stage/promote`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fromStageId, toStageId, quota }),
-      }, 3000);
-      if (res.ok) return await res.json();
-    } catch {
-      isServerOnline = false;
-    }
-  }
-
-  const db = loadLocalDatabase();
-  const ranked = computeLocalStageLeaderboard(db, fromStageId);
+  const ranked = computeLeaderboard(cachedDb.students, cachedDb.submissions, fromStageId);
   const passingCount = quota || (toStageId === 'top30' ? 30 : toStageId === 'semifinal' ? 10 : 3);
   const promotedStudents = ranked.slice(0, passingCount);
   const promotedIds = promotedStudents.map(s => s.studentId);
 
-  db.students.forEach(st => {
+  cachedDb.students.forEach(st => {
     if (promotedIds.includes(st.id)) {
       st.qualifiedStage = toStageId;
       st.status = 'lolos';
@@ -611,141 +507,94 @@ export async function adminPromoteStudents(fromStageId: StageId, toStageId: Stag
     }
   });
 
-  saveLocalDatabase(db);
-  dispatchLocalSyncEvent('STUDENTS_PROMOTED', {
-    fromStageId,
-    toStageId,
-    promotedCount: promotedIds.length,
-    promotedNames: promotedStudents.map(p => p.nama)
-  });
+  // Batch update students in Firestore
+  try {
+    const batch = writeBatch(db);
+    cachedDb.students.forEach(st => {
+      batch.set(doc(db, 'students', st.id), st, { merge: true });
+    });
+    await batch.commit();
+  } catch (err) {
+    console.warn('Firestore promote students batch error:', err);
+  }
 
   return { success: true, promotedCount: promotedIds.length, promotedStudents };
 }
 
 export async function adminSaveQuestion(question: Partial<Question>) {
   const isEdit = !!question.id && !question.id.startsWith('new_');
-  const apiBase = getApiBase();
+  const targetId = question.id || `q_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+  const qData: Question = {
+    ...(question as Question),
+    id: targetId
+  };
 
-  if (isServerOnline) {
-    try {
-      const url = isEdit ? `${apiBase}/api/admin/questions/${question.id}` : `${apiBase}/api/admin/questions`;
-      const res = await fetchWithTimeout(url, {
-        method: isEdit ? 'PUT' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(question),
-      }, 3000);
-      if (res.ok) return await res.json();
-    } catch {
-      isServerOnline = false;
-    }
-  }
-
-  const db = loadLocalDatabase();
   if (isEdit) {
-    const idx = db.questions.findIndex(q => q.id === question.id);
-    if (idx >= 0) {
-      db.questions[idx] = { ...db.questions[idx], ...question } as Question;
-    }
+    const idx = cachedDb.questions.findIndex(q => q.id === targetId);
+    if (idx >= 0) cachedDb.questions[idx] = qData;
   } else {
-    const newQ: Question = {
-      ...(question as Question),
-      id: question.id || `q_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`
-    };
-    db.questions.push(newQ);
+    cachedDb.questions.push(qData);
   }
-  saveLocalDatabase(db);
-  return { success: true, question };
+
+  try {
+    await setDoc(doc(db, 'questions', targetId), qData);
+  } catch (err) {
+    console.warn('Firestore save question error:', err);
+  }
+
+  return { success: true, question: qData };
 }
 
 export async function adminDeleteQuestion(id: string) {
-  const apiBase = getApiBase();
-
-  if (isServerOnline) {
-    try {
-      const res = await fetchWithTimeout(`${apiBase}/api/admin/questions/${id}`, { method: 'DELETE' }, 3000);
-      if (res.ok) return await res.json();
-    } catch {
-      isServerOnline = false;
-    }
+  cachedDb.questions = cachedDb.questions.filter(q => q.id !== id);
+  try {
+    await deleteDoc(doc(db, 'questions', id));
+  } catch (err) {
+    console.warn('Firestore delete question error:', err);
   }
-
-  const db = loadLocalDatabase();
-  db.questions = db.questions.filter(q => q.id !== id);
-  saveLocalDatabase(db);
   return { success: true };
 }
 
 export async function adminSaveStudent(student: Partial<Student>) {
   const isEdit = !!student.id && !student.id.startsWith('new_');
-  const apiBase = getApiBase();
+  const targetId = student.id || `std_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+  const sData: Student = {
+    ...(student as Student),
+    id: targetId,
+    qualifiedStage: student.qualifiedStage || 'penyisihan',
+    status: student.status || 'aktif'
+  };
 
-  if (isServerOnline) {
-    try {
-      const url = isEdit ? `${apiBase}/api/admin/students/${student.id}` : `${apiBase}/api/admin/students`;
-      const res = await fetchWithTimeout(url, {
-        method: isEdit ? 'PUT' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(student),
-      }, 3000);
-      if (res.ok) return await res.json();
-    } catch {
-      isServerOnline = false;
-    }
-  }
-
-  const db = loadLocalDatabase();
   if (isEdit) {
-    const idx = db.students.findIndex(s => s.id === student.id);
-    if (idx >= 0) {
-      db.students[idx] = { ...db.students[idx], ...student } as Student;
-    }
+    const idx = cachedDb.students.findIndex(s => s.id === targetId);
+    if (idx >= 0) cachedDb.students[idx] = sData;
   } else {
-    const newStudent: Student = {
-      ...(student as Student),
-      id: student.id || `std_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      qualifiedStage: student.qualifiedStage || 'penyisihan',
-      status: student.status || 'aktif'
-    };
-    db.students.push(newStudent);
+    cachedDb.students.push(sData);
   }
-  saveLocalDatabase(db);
-  return { success: true, student };
+
+  try {
+    await setDoc(doc(db, 'students', targetId), sData);
+  } catch (err) {
+    console.warn('Firestore save student error:', err);
+  }
+
+  return { success: true, student: sData };
 }
 
 export async function adminDeleteStudent(id: string) {
-  const apiBase = getApiBase();
+  cachedDb.students = cachedDb.students.filter(s => s.id !== id);
+  cachedDb.submissions = cachedDb.submissions.filter(sub => sub.studentId !== id);
 
-  if (isServerOnline) {
-    try {
-      const res = await fetchWithTimeout(`${apiBase}/api/admin/students/${id}`, { method: 'DELETE' }, 3000);
-      if (res.ok) return await res.json();
-    } catch {
-      isServerOnline = false;
-    }
+  try {
+    await deleteDoc(doc(db, 'students', id));
+  } catch (err) {
+    console.warn('Firestore delete student error:', err);
   }
 
-  const db = loadLocalDatabase();
-  db.students = db.students.filter(s => s.id !== id);
-  if (db.submissions) {
-    db.submissions = db.submissions.filter(sub => sub.studentId !== id);
-  }
-  saveLocalDatabase(db);
   return { success: true };
 }
 
 export async function adminBulkSeedStudents() {
-  const apiBase = getApiBase();
-
-  if (isServerOnline) {
-    try {
-      const res = await fetchWithTimeout(`${apiBase}/api/admin/students/bulk-seed`, { method: 'POST' }, 3000);
-      if (res.ok) return await res.json();
-    } catch {
-      isServerOnline = false;
-    }
-  }
-
-  const db = loadLocalDatabase();
   const sampleNames = [
     'Alifia Rahma', 'Bagas Pratama', 'Citra Dewi', 'Doni Kurniawan',
     'Elsa Novita', 'Fajar Ramadhan', 'Gita Permata', 'Hendra Saputra',
@@ -759,7 +608,7 @@ export async function adminBulkSeedStudents() {
   ];
 
   const newGenerated: Student[] = sampleNames.map((name, i) => {
-    const num = db.students.length + i + 1;
+    const num = cachedDb.students.length + i + 1;
     const formattedNum = num < 10 ? `00${num}` : num < 100 ? `0${num}` : `${num}`;
     return {
       id: `std_gen_${Date.now()}_${i}`,
@@ -773,62 +622,88 @@ export async function adminBulkSeedStudents() {
     };
   });
 
-  db.students.push(...newGenerated);
-  saveLocalDatabase(db);
-  return { success: true, addedCount: newGenerated.length, total: db.students.length };
+  cachedDb.students.push(...newGenerated);
+
+  try {
+    const batch = writeBatch(db);
+    newGenerated.forEach(st => {
+      batch.set(doc(db, 'students', st.id), st);
+    });
+    await batch.commit();
+  } catch (err) {
+    console.warn('Firestore bulk seed error:', err);
+  }
+
+  return { success: true, addedCount: newGenerated.length, total: cachedDb.students.length };
 }
 
 export async function adminResetProgress(stageId: string = 'all') {
-  const apiBase = getApiBase();
-
-  if (isServerOnline) {
-    try {
-      const res = await fetchWithTimeout(`${apiBase}/api/admin/reset-progress`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stageId }),
-      }, 3000);
-      if (res.ok) return await res.json();
-    } catch {
-      isServerOnline = false;
-    }
-  }
-
-  const db = loadLocalDatabase();
   if (stageId && stageId !== 'all') {
-    db.submissions = (db.submissions || []).filter(s => s.stageId !== stageId);
-    if (db.studentProgress) {
-      Object.keys(db.studentProgress).forEach(k => {
-        if (k.endsWith(`_${stageId}`)) delete db.studentProgress[k];
-      });
-    }
+    cachedDb.submissions = cachedDb.submissions.filter(s => s.stageId !== stageId);
   } else {
-    db.submissions = [];
-    db.studentProgress = {};
-    db.students.forEach(st => {
+    cachedDb.submissions = [];
+    cachedDb.students.forEach(st => {
       st.qualifiedStage = 'penyisihan';
       st.status = 'aktif';
     });
   }
-  saveLocalDatabase(db);
-  dispatchLocalSyncEvent('STATE_RESET', { stageId });
+
+  // Clear submissions in Firestore
+  try {
+    const subSnaps = await getDocs(collection(db, 'submissions'));
+    const batch = writeBatch(db);
+    subSnaps.forEach(docSnap => {
+      const data = docSnap.data();
+      if (stageId === 'all' || data.stageId === stageId) {
+        batch.delete(docSnap.ref);
+      }
+    });
+    await batch.commit();
+
+    // Reset student qualified stage in Firestore if full reset
+    if (stageId === 'all') {
+      const studentBatch = writeBatch(db);
+      cachedDb.students.forEach(st => {
+        studentBatch.update(doc(db, 'students', st.id), { qualifiedStage: 'penyisihan', status: 'aktif' });
+      });
+      await studentBatch.commit();
+    }
+  } catch (err) {
+    console.warn('Firestore reset progress error:', err);
+  }
+
   return { success: true };
 }
 
 // Backup & Restore utilities
 export function exportDatabaseBackup(): string {
-  const db = loadLocalDatabase();
-  return JSON.stringify(db, null, 2);
+  return JSON.stringify(cachedDb, null, 2);
 }
 
-export function importDatabaseBackup(jsonString: string): boolean {
+export async function importDatabaseBackup(jsonString: string): Promise<boolean> {
   try {
     const parsed = JSON.parse(jsonString);
     if (!parsed.stages || !parsed.students || !parsed.questions) {
       throw new Error('Format database backup tidak valid.');
     }
-    saveLocalDatabase(parsed);
-    dispatchLocalSyncEvent('STATE_UPDATED', { activeStageId: parsed.activeStageId });
+    cachedDb = parsed;
+
+    // Push imported data to Firestore
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'app_state', 'main'), {
+      activeStageId: parsed.activeStageId || 'penyisihan',
+      stages: parsed.stages,
+      updatedAt: Date.now()
+    });
+
+    for (const st of parsed.students) {
+      batch.set(doc(db, 'students', st.id), st);
+    }
+    for (const q of parsed.questions) {
+      batch.set(doc(db, 'questions', q.id), q);
+    }
+    await batch.commit();
+
     return true;
   } catch (err: any) {
     console.error('Import failed', err);
@@ -836,89 +711,142 @@ export function importDatabaseBackup(jsonString: string): boolean {
   }
 }
 
-// Real-Time Event Listener with SSE + BroadcastChannel + Local Polling
+// Legacy helpers for backwards compatibility
+export function getCustomServerUrl(): string {
+  return '';
+}
+export function setCustomServerUrl(url: string): void {}
+export function getServerStatus(): boolean {
+  return isFirestoreConnected;
+}
+
+// ====================================================
+// REALTIME SUBSCRIPTION (FIREBASE FIRESTORE LISTENERS)
+// This powers the instantaneous real-time sync between Panitia laptop & Student phones!
+// ====================================================
+
 export function subscribeToRealtimeUpdates(onEvent: (event: { type: string; data: any }) => void) {
-  let eventSource: EventSource | null = null;
-  let pollingTimer: any = null;
-  const apiBase = getApiBase();
+  const unsubscribers: (() => void)[] = [];
 
-  function connectSSE() {
-    try {
-      eventSource = new EventSource(`${apiBase}/api/realtime/stream`);
-
-      eventSource.addEventListener('CONNECTED', (e: any) => {
-        isServerOnline = true;
-        onEvent({ type: 'CONNECTED', data: JSON.parse(e.data || '{}') });
-      });
-
-      eventSource.addEventListener('SUBMISSION_RECEIVED', (e: any) => {
-        onEvent({ type: 'SUBMISSION_RECEIVED', data: JSON.parse(e.data || '{}') });
-      });
-
-      eventSource.addEventListener('STAGE_ACTIVATED', (e: any) => {
-        onEvent({ type: 'STAGE_ACTIVATED', data: JSON.parse(e.data || '{}') });
-      });
-
-      eventSource.addEventListener('STUDENTS_PROMOTED', (e: any) => {
-        onEvent({ type: 'STUDENTS_PROMOTED', data: JSON.parse(e.data || '{}') });
-      });
-
-      eventSource.addEventListener('STATE_UPDATED', (e: any) => {
-        onEvent({ type: 'STATE_UPDATED', data: JSON.parse(e.data || '{}') });
-      });
-
-      eventSource.addEventListener('STATE_RESET', (e: any) => {
-        onEvent({ type: 'STATE_RESET', data: JSON.parse(e.data || '{}') });
-      });
-
-      eventSource.onerror = () => {
-        if (eventSource) {
-          eventSource.close();
-          eventSource = null;
+  try {
+    // 1. Listen to global app_state (stage changes, active stage) in REAL-TIME
+    const unsubAppState = onSnapshot(doc(db, 'app_state', 'main'), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        isFirestoreConnected = true;
+        if (data.activeStageId) {
+          cachedDb.activeStageId = data.activeStageId;
         }
-      };
-    } catch {
-      // SSE not available (e.g. Netlify static mode)
-    }
+        if (data.stages) {
+          cachedDb.stages = data.stages;
+        }
+        if (data.announcement) {
+          cachedDb.announcement = data.announcement;
+        }
+
+        const currentLeaderboard = computeLeaderboard(
+          cachedDb.students,
+          cachedDb.submissions,
+          cachedDb.activeStageId
+        );
+
+        onEvent({
+          type: 'STAGE_ACTIVATED',
+          data: {
+            activeStageId: cachedDb.activeStageId,
+            stages: cachedDb.stages,
+            leaderboard: currentLeaderboard
+          }
+        });
+      }
+    }, (error) => {
+      console.warn('Firestore app_state snapshot error:', error);
+    });
+    unsubscribers.push(unsubAppState);
+
+    // 2. Listen to submissions in REAL-TIME
+    // Whenever ANY student answers a question on their phone, this triggers on the Panitia laptop!
+    const unsubSubmissions = onSnapshot(collection(db, 'submissions'), (snapshot) => {
+      isFirestoreConnected = true;
+      const submissions: AnswerSubmission[] = [];
+      snapshot.forEach(docSnap => {
+        submissions.push(docSnap.data() as AnswerSubmission);
+      });
+      cachedDb.submissions = submissions;
+
+      const currentLeaderboard = computeLeaderboard(
+        cachedDb.students,
+        submissions,
+        cachedDb.activeStageId
+      );
+
+      onEvent({
+        type: 'SUBMISSION_RECEIVED',
+        data: {
+          submissions,
+          leaderboard: currentLeaderboard
+        }
+      });
+    }, (error) => {
+      console.warn('Firestore submissions snapshot error:', error);
+    });
+    unsubscribers.push(unsubSubmissions);
+
+    // 3. Listen to students collection in REAL-TIME
+    const unsubStudents = onSnapshot(collection(db, 'students'), (snapshot) => {
+      const students: Student[] = [];
+      snapshot.forEach(docSnap => {
+        students.push(docSnap.data() as Student);
+      });
+      if (students.length > 0) {
+        cachedDb.students = students;
+        const currentLeaderboard = computeLeaderboard(
+          students,
+          cachedDb.submissions,
+          cachedDb.activeStageId
+        );
+        onEvent({
+          type: 'STUDENTS_PROMOTED',
+          data: {
+            students,
+            leaderboard: currentLeaderboard
+          }
+        });
+      }
+    }, (error) => {
+      console.warn('Firestore students snapshot error:', error);
+    });
+    unsubscribers.push(unsubStudents);
+
+    // 4. Listen to questions collection in REAL-TIME
+    const unsubQuestions = onSnapshot(collection(db, 'questions'), (snapshot) => {
+      const questions: Question[] = [];
+      snapshot.forEach(docSnap => {
+        questions.push(docSnap.data() as Question);
+      });
+      if (questions.length > 0) {
+        cachedDb.questions = questions;
+        onEvent({
+          type: 'STATE_UPDATED',
+          data: { questions }
+        });
+      }
+    }, (error) => {
+      console.warn('Firestore questions snapshot error:', error);
+    });
+    unsubscribers.push(unsubQuestions);
+
+  } catch (err) {
+    console.warn('Error setting up Firestore realtime listeners:', err);
   }
-
-  connectSSE();
-
-  // Listen to cross-tab BroadcastChannel events (Netlify / offline mode)
-  const handleBroadcast = (e: MessageEvent) => {
-    if (e.data && e.data.type) {
-      onEvent(e.data);
-    }
-  };
-  broadcastChannel?.addEventListener('message', handleBroadcast);
-
-  // Listen to window custom event on the same tab
-  const handleLocalEvent = (e: Event) => {
-    const customEvent = e as CustomEvent;
-    if (customEvent.detail) {
-      onEvent(customEvent.detail);
-    }
-  };
-  if (typeof window !== 'undefined') {
-    window.addEventListener('gelora26_local_sync', handleLocalEvent);
-  }
-
-  // Periodic polling fallback every 5 seconds
-  pollingTimer = setInterval(async () => {
-    try {
-      const state = await fetchAppState();
-      onEvent({ type: 'POLL_SYNC', data: state });
-    } catch {
-      // silent
-    }
-  }, 5000);
 
   return () => {
-    if (eventSource) eventSource.close();
-    if (pollingTimer) clearInterval(pollingTimer);
-    broadcastChannel?.removeEventListener('message', handleBroadcast);
-    if (typeof window !== 'undefined') {
-      window.removeEventListener('gelora26_local_sync', handleLocalEvent);
-    }
+    unsubscribers.forEach(unsub => {
+      try {
+        unsub();
+      } catch {
+        // ignore
+      }
+    });
   };
 }

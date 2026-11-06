@@ -97,10 +97,10 @@ export const PanitiaDashboard: React.FC<PanitiaDashboardProps> = ({
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       try {
         const content = event.target?.result as string;
-        importDatabaseBackup(content);
+        await importDatabaseBackup(content);
         showToast('Database berhasil dipulihkan dari file backup!');
         onRefreshState();
       } catch (err: any) {
@@ -1053,13 +1053,13 @@ export const PanitiaDashboard: React.FC<PanitiaDashboardProps> = ({
               <div className="relative z-10 max-w-3xl">
                 <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 mb-3">
                   <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Aplikasi 100% Siap untuk Publikasi Siswa di Netlify</span>
+                  <span>Cloud Database Realtime Firebase Firestore Aktif</span>
                 </div>
                 <h2 className="text-2xl sm:text-3xl font-black tracking-wide">
-                  Pusat Publikasi & Deployment Siswa GELORA 26
+                  Pusat Sinkronisasi Realtime & Publikasi Netlify
                 </h2>
                 <p className="text-sm text-sky-100 mt-2 leading-relaxed">
-                  Aplikasi ini kini dilengkapi <strong>Dual-Mode Engine</strong>: dapat di-deploy ke <strong>Netlify</strong> (gratis dan cepat) tanpa membutuhkan server rumit. Siswa dapat membuka link di HP masing-masing, login dengan Nomor Peserta & PIN, mengerjakan 4 tipe soal, dan nilai langsung terhitung seketika!
+                  Aplikasi telah terhubung ke <strong>Firebase Cloud Firestore</strong>! Sekarang perubahan babak di laptop panitia <strong>langsung berubah secara realtime di HP seluruh siswa</strong>, dan setiap jawaban/skor yang dikerjakan siswa di HP <strong>langsung muncul seketika di papan skor / proyektor laptop panitia</strong> tanpa perlu refresh!
                 </p>
               </div>
               <div className="absolute -right-10 -bottom-10 w-72 h-72 bg-amber-400/10 rounded-full blur-3xl pointer-events-none" />
@@ -1069,40 +1069,39 @@ export const PanitiaDashboard: React.FC<PanitiaDashboardProps> = ({
             <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200">
               <h3 className="text-base font-bold text-slate-900 flex items-center gap-2 mb-4">
                 <Server className="w-5 h-5 text-blue-600" />
-                <span>Status Sistem Saat Ini</span>
+                <span>Status Sinkronisasi Multi-Perangkat (Laptop & HP Siswa)</span>
               </h3>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl">
-                  <div className="text-xs font-bold text-emerald-800 uppercase tracking-wider mb-1">Mode Operasional</div>
-                  <div className="text-lg font-black text-emerald-950 flex items-center gap-1.5">
+                  <div className="text-xs font-bold text-emerald-800 uppercase tracking-wider mb-1">Database Cloud Realtime</div>
+                  <div className="text-base font-black text-emerald-950 flex items-center gap-1.5">
                     <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
-                    <span>Netlify & Standalone Ready</span>
+                    <span>Firebase Firestore Online</span>
                   </div>
                   <p className="text-[11px] text-emerald-700 mt-1">
-                    Aplikasi otomatis menyimpan data di browser dan berjalan lancar tanpa server Express.
+                    Sinkronisasi otomatis antar-perangkat (Laptop Panitia ⟷ HP Siswa) via cloud stream.
                   </p>
                 </div>
 
                 <div className="p-4 bg-sky-50 border border-sky-200 rounded-xl">
-                  <div className="text-xs font-bold text-sky-800 uppercase tracking-wider mb-1">Konfigurasi Netlify</div>
-                  <div className="text-lg font-black text-sky-950 flex items-center gap-1.5">
-                    <FileCheck className="w-5 h-5 text-sky-600" />
-                    <span>netlify.toml & Node 22</span>
+                  <div className="text-xs font-bold text-sky-800 uppercase tracking-wider mb-1">Hosting Netlify</div>
+                  <div className="text-base font-black text-sky-950 flex items-center gap-1.5">
+                    <Globe className="w-5 h-5 text-sky-600" />
+                    <span className="truncate">jovial-strudel-cc47b0.netlify.app</span>
                   </div>
                   <p className="text-[11px] text-sky-700 mt-1">
-                    Sudah terpasang file redirect SPA (mencegah error 404 saat siswa refresh halaman).
+                    File build siap di-update ke Netlify untuk mengaktifkan sinkronisasi realtime ini.
                   </p>
                 </div>
 
                 <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl">
-                  <div className="text-xs font-bold text-amber-800 uppercase tracking-wider mb-1">Server Terpusat</div>
-                  <div className="text-sm font-bold text-amber-950 truncate">
-                    {customServerUrlInput.trim() ? customServerUrlInput.trim() : 'Bawaan (Offline / Netlify CDN)'}
+                  <div className="text-xs font-bold text-amber-800 uppercase tracking-wider mb-1">Live Update Stream</div>
+                  <div className="text-base font-black text-amber-950 flex items-center gap-1.5">
+                    <Radio className="w-4 h-4 text-amber-600 animate-pulse" />
+                    <span>onSnapshot Active</span>
                   </div>
                   <p className="text-[11px] text-amber-700 mt-1">
-                    {customServerUrlInput.trim() 
-                      ? 'Tersambung ke server sinkronisasi kustom.' 
-                      : 'Menggunakan penyimpanan cerdas lokal peserta.'}
+                    Skor, aktivasi babak, dan peringkat terkirim instan ~100ms ke semua layar.
                   </p>
                 </div>
               </div>

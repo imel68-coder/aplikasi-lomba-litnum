@@ -67,8 +67,30 @@ export default function App() {
         if (event.data?.activeStageId) {
           setActiveStageId(event.data.activeStageId);
         }
+        if (event.data?.stages) {
+          setStages(event.data.stages);
+        }
+        if (event.data?.leaderboard) {
+          setLeaderboard(event.data.leaderboard);
+        }
         loadState();
-      } else if (event.type === 'STUDENTS_PROMOTED' || event.type === 'STATE_UPDATED' || event.type === 'STATE_RESET') {
+      } else if (event.type === 'STUDENTS_PROMOTED') {
+        if (event.data?.students) {
+          setStudents(event.data.students);
+          // Update current student if their qualified stage changed
+          if (currentUser && userRole === 'student') {
+            const updatedMe = event.data.students.find((s: Student) => s.id === currentUser.id);
+            if (updatedMe && (updatedMe.qualifiedStage !== currentUser.qualifiedStage || updatedMe.status !== currentUser.status)) {
+              setCurrentUser(updatedMe);
+              localStorage.setItem('gelora26_user', JSON.stringify(updatedMe));
+            }
+          }
+        }
+        if (event.data?.leaderboard) {
+          setLeaderboard(event.data.leaderboard);
+        }
+        loadState();
+      } else if (event.type === 'STATE_UPDATED' || event.type === 'STATE_RESET') {
         loadState();
       } else if (event.type === 'POLL_SYNC' && event.data) {
         if (event.data.activeStageId) setActiveStageId(event.data.activeStageId);
